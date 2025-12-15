@@ -1,0 +1,95 @@
+#!/bin/bash
+#SBATCH --job-name=step2_demultiplex
+#SBATCH --output=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step2_demultiplex.out
+#SBATCH --error=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step2_demultiplex.err
+#SBATCH --time=18:00:00
+#SBATCH --mem=24G
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=highmem
+
+echo "===================================================================="
+echo "[`date`] Starting step2_demultiplex"
+echo "Host: $(hostname)"
+echo "===================================================================="
+echo
+
+############################################
+# Load CONFIG
+############################################
+if [[ -z "$CONFIG" ]]; then
+    echo "Missing CONFIG!"
+    exit 1
+fi
+source "$CONFIG"
+
+############################################
+# FASTQ ROOT DIRECTORY
+############################################
+FASTQ_DIR=${FASTQ_ROOT}
+echo "[`date`] FASTQ root: ${FASTQ_DIR}"
+echo
+
+############################################
+# Detect plates (S01, S02)
+############################################
+PLATES=($(ls ${FASTQ_DIR}/*.fq.gz | grep -o 'S0[1-2]' | sort -u))
+
+if [[ ${#PLATES[@]} -eq 0 ]]; then
+    echo "[ERROR] No S01/S02 detected in FASTQ filenames."
+    exit 1
+fi
+
+echo "[`date`] Detected plates: ${PLATES[@]}"
+echo
+
+############################################
+# Loop through each plate
+############################################
+for PL in "${PLATES[@]}"; do
+    echo "-------------------------------------------------------------"
+    echo "[`date`] Processing plate: ${PL}"
+    echo "-------------------------------------------------------------"
+
+    OUTDIR=${DIR_PROJ}/demultiplexed_fastq/plate_${PL}
+    mkdir -p ${OUTDIR}
+    cd ${OUTDIR}
+
+    # Find matching FASTQs
+    R1_FILE=$(ls ${FASTQ_DIR}/*${PL}*R1*.fq.gz | head -n 1)
+    R2_FILE=$(ls ${FASTQ_DIR}/*${PL}*R2*.fq.gz | head -n 1)
+
+    echo "R1 file: $R1_FILE"
+    echo "R2 file: $R2_FILE"
+
+    if [[ -z "$R1_FILE" || -z "$R2_FILE" ]]; then
+        echo "[WARNING] Missing R1/R2 for ${PL}, skipping."
+        continue
+    fi
+
+    ############################################
+    # Run demultiplexing
+    ############################################
+    for INDEX_FILE in 1 2; do
+        echo "[`date`] Demultiplexing ${PL} with barcode subset ${INDEX_FILE}/2 ..."
+
+        perl ${PIPELINE_DIR}/your_Scripts/step2_demultiplex_dontrun.pl \
+            ${R1_FILE} ${R2_FILE} \
+            ${PIPELINE_DIR}/your_Scripts/step2_cellbarcodes_subset${INDEX_FILE}_dontrun.fa \
+            > ${OUTDIR}/demultip_subset${INDEX_FILE}.log 2>&1
+    done
+
+    ############################################
+    # Validate output
+    ############################################
+    if [[ -d ${OUTDIR}/fastq_demultip && $(ls ${OUTDIR}/fastq_demultip | wc -l) -gt 0 ]]; then
+        echo "[`date`] ✓ Demultiplexing complete for ${PL}"
+    else
+        echo "[`date`] ⚠ WARNING: empty or missing fastq_demultip for ${PL}"
+    fi
+
+    echo
+done
+
+echo "===================================================================="
+echo "[`date`] Completed step2_demultiplex"
+echo "===================================================================="

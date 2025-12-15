@@ -1,0 +1,163 @@
+#!/bin/bash
+#SBATCH --job-name=step7_pseudobulk_merge
+#SBATCH --output=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step7_pseudobulk_merge.out
+#SBATCH --error=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step7_pseudobulk_merge.err
+#SBATCH --time=24:00:00
+#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --partition=highmem
+#SBATCH --chdir=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom
+
+echo "===================================================================="
+echo "[`date`] Starting step7_pseudobulk_merge"
+echo "Host: $(hostname)"
+echo "===================================================================="
+echo
+
+############################################
+# Load CONFIG (dynamic)
+############################################
+if [[ -z "$CONFIG" ]]; then
+    echo "Missing CONFIG!"
+    exit 1
+fi
+source "$CONFIG"
+
+
+############################################
+# Environment setup
+############################################
+module load samtools
+
+############################################
+# Project directories
+############################################
+METADATA=${DIR_PROJ}/gRNA_assignments/combined_cleaned_gRNA_assignments.tsv
+
+# Updated DNA dir name:
+BASE_DIR=${DIR_PROJ}/bismark_alignment_SEPE
+
+OUTDIR=${DIR_PROJ}/pseudobulk_bams
+mkdir -p ${OUTDIR}
+
+echo "[`date`] Using metadata: ${METADATA}"
+echo "[`date`] DNA BAM source: ${BASE_DIR}"
+echo "[`date`] Pseudobulk output: ${OUTDIR}"
+echo
+
+############################################
+# Export paths for Python
+############################################
+export METADATA BASE_DIR OUTDIR
+
+############################################
+# Run Python merging script
+############################################
+python3 << 'EOF'
+import os, glob, subprocess
+import pandas as pd
+
+metadata = os.environ["METADATA"]
+base_dir = os.environ["BASE_DIR"]
+out_dir  = os.environ["OUTDIR"]
+
+############################################################
+# Load metadata
+############################################################
+df = pd.read_csv(metadata, sep="\t")
+
+df["WELL"] = df["WELL"].astype(str).str.strip()
+df = df[df["Assigned_Label"].isin(["D1", "ST"])]
+
+# Plate column already exists in step6 output (good!)
+# Example values: "plate_S01", "plate_S02"
+if "Plate" not in df.columns:
+    raise ValueError("Metadata missing 'Plate' column. Step6 output required.")
+
+print(f"Loaded {len(df)} wells labeled as D1/ST.")
+print("=" * 70)
+
+############################################################
+# Helper: find all BAMs for a single well
+############################################################
+def find_bams_for_well(plate, well):
+    plate_dir = os.path.join(base_dir, plate, "mapping_bismark")
+
+    # Look for directories like PREFIX_WELL_indexed
+    well_dirs = glob.glob(os.path.join(plate_dir, f"*_{well}_indexed"))
+    if not well_dirs:
+        print(f"⚠️ No BAM directory for {plate}/{well}")
+        return []
+
+    well_dir = well_dirs[0]
+
+    patterns = [
+        "*_trimmed_R1_bismark_bt2_pe.bam",
+        "*_singletrim_R1_bismark_bt2.bam",
+        "*_singletrim_R2_bismark_bt2.bam",
+        "*_unmapped_reads_1_bismark_bt2.bam",
+        "*_unmapped_reads_2_bismark_bt2.bam",
+    ]
+
+    found = []
+    for pat in patterns:
+        for f in glob.glob(os.path.join(well_dir, pat)):
+            print(f"   ✓ {f}")
+            found.append(f)
+
+    return found
+
+############################################################
+# Group by plate and gRNA label
+############################################################
+groups = df.groupby(["Plate", "Assigned_Label"])
+
+for (plate, label), sub in groups:
+    print(f"\n🔹 Processing group: {plate} | {label}")
+    bam_list = []
+
+    for _, row in sub.iterrows():
+        well = row["WELL"]
+        print(f"\n🔸 WELL {well}")
+        bam_list.extend(find_bams_for_well(plate, well))
+
+    if not bam_list:
+        print(f"❌ No BAM files found for {plate}-{label}; skipping.")
+        continue
+
+    # Output file names
+    list_file    = os.path.join(out_dir, f"{plate}_{label}_bam_list.txt")
+    unsorted_bam = os.path.join(out_dir, f"{plate}_{label}_unsorted.bam")
+    sorted_bam   = os.path.join(out_dir, f"{plate}_{label}_pseudobulk_DNA.bam")
+
+    # Write BAM list
+    with open(list_file, "w") as f:
+        f.write("\n".join(bam_list))
+
+    ############################################################
+    # Merge BAMs
+    ############################################################
+    print(f"\n[{plate}|{label}] Merging BAMs → {unsorted_bam}")
+    subprocess.run(f"samtools merge -b {list_file} -@ 8 -n {unsorted_bam}", shell=True, check=True)
+
+    ############################################################
+    # Sort
+    ############################################################
+    print(f"[{plate}|{label}] Sorting → {sorted_bam}")
+    subprocess.run(f"samtools sort -@ 8 -o {sorted_bam} {unsorted_bam}", shell=True, check=True)
+
+    ############################################################
+    # Index
+    ############################################################
+    print(f"[{plate}|{label}] Indexing")
+    subprocess.run(f"samtools index {sorted_bam}", shell=True, check=True)
+
+    os.remove(unsorted_bam)
+    print(f"[{plate}|{label}] ✓ Completed pseudobulk DNA BAM")
+
+print("\n✓ All pseudobulk merges completed.")
+EOF
+
+echo
+echo "[`date`] Completed step7_pseudobulk_merge"
+echo "===================================================================="

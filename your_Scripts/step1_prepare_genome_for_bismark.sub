@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=step1_prep_bismark
+#SBATCH --output=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom/your_job_logs/step1_prep_bismark.out
+#SBATCH --error=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom/your_job_logs/step1_prep_bismark.err
+#SBATCH --time=24:00:00
+#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=highmem
+#SBATCH --chdir=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom/
+
+echo "[$(date)] Starting step1_prep_bismark on $(hostname -s)"
+echo
+
+########################################
+# 1. Load config file (your only source of truth)
+########################################
+CONFIG=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom/your_path_setups.config
+if [[ ! -f "$CONFIG" ]]; then
+    echo "[ERROR] Missing config file: $CONFIG"
+    exit 1
+fi
+source "$CONFIG"
+
+########################################
+# 2. Environment setup
+########################################
+# source ~/.bashrc
+# mamba activate ${CONDA_ENV}
+
+########################################
+# 3. Build Bismark index (NO LOGIC CHANGE)
+########################################
+cd ${REF_DIR}
+echo "Building Bismark index in ${REF_DIR} ..."
+bismark_genome_preparation ${REF_DIR} --bowtie2
+
+echo
+echo "[$(date)] step1_prep_bismark completed successfully."

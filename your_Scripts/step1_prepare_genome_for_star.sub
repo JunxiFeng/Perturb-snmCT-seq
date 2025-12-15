@@ -1,0 +1,51 @@
+#!/bin/bash
+#SBATCH --job-name=step1_prep_star
+#SBATCH --output=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom/your_job_logs/step1_prep_star.out
+#SBATCH --error=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom/your_job_logs/step1_prep_star.err
+#SBATCH --time=24:00:00
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=8
+#SBATCH --partition=highmem
+#SBATCH --chdir=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom
+
+echo "[$(date)] Starting step1_genome_prep_star on $(hostname -s)"
+echo
+
+# -----------------------------------------------------------------------------
+# Load CONFIG (new single source of truth)
+# -----------------------------------------------------------------------------
+CONFIG=/mnt/jin/group/cassie/Cassie/LuoLab_Pipeline_Custom/your_path_setups.config
+if [[ ! -f "$CONFIG" ]]; then
+    echo "[ERROR] Missing config file: $CONFIG"
+    exit 1
+fi
+source "$CONFIG"
+
+# -----------------------------------------------------------------------------
+# Environment setup
+# -----------------------------------------------------------------------------
+# source ~/.bashrc
+# module load star/2.7.9a
+# mamba activate ${CONDA_ENV}
+
+# -----------------------------------------------------------------------------
+# Reference genome (from config file)
+# -----------------------------------------------------------------------------
+ref_dir=${REF_DIR}
+ref_fasta=${REF_FASTA}
+ref_gtf=${REF_GTF}
+
+# -----------------------------------------------------------------------------
+# Build STAR genome index (paired-end 2×150)
+# -----------------------------------------------------------------------------
+cd ${ref_dir}
+echo "Building STAR index in ${ref_dir}/STAR149 ..."
+STAR --runThreadN 8 \
+     --runMode genomeGenerate \
+     --genomeDir ${STAR_INDEX} \
+     --genomeFastaFiles ${ref_fasta} \
+     --sjdbGTFfile ${ref_gtf} \
+     --sjdbOverhang 149
+
+echo
+echo "[$(date)] step1_genome_prep_star completed successfully."

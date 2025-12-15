@@ -1,0 +1,219 @@
+#!/bin/bash
+#SBATCH --job-name=step5_summary
+#SBATCH --output=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step5_summary.out
+#SBATCH --error=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step5_summary.err
+#SBATCH --time=4:00:00
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=highmem
+
+echo "===================================================================="
+echo "[`date`] Starting step5_combined_summary"
+echo "Host: $(hostname)"
+echo "===================================================================="
+echo
+
+############################################
+# Load CONFIG (dynamic)
+############################################
+if [[ -z "$CONFIG" ]]; then
+    echo "Missing CONFIG!"
+    exit 1
+fi
+source "$CONFIG"
+
+
+############################################
+# Project directories
+############################################
+FASTP_ROOT=${DIR_PROJ}/trimmed_fastq
+BISMARK_ROOT=${DIR_PROJ}/bismark_alignment_SEPE
+STAR_ROOT=${DIR_PROJ}/star_alignment     # matches updated RNA step
+OUTDIR=${DIR_PROJ}/combined_summary
+mkdir -p ${OUTDIR}
+
+echo "[`date`] Directories:"
+echo "FASTP:    ${FASTP_ROOT}"
+echo "BISMARK:  ${BISMARK_ROOT}"
+echo "STAR:     ${STAR_ROOT}"
+echo "OUTPUT:   ${OUTDIR}"
+echo
+
+############################################
+# Run summary Python script
+############################################
+python3 << 'EOF'
+import os, re, json, pandas as pd
+import numpy as np
+
+FASTP_ROOT = "${FASTP_ROOT}"
+BISMARK_ROOT = "${BISMARK_ROOT}"
+STAR_ROOT = "${STAR_ROOT}"
+OUTDIR = "${OUTDIR}"
+os.makedirs(OUTDIR, exist_ok=True)
+
+############################################################
+# Detect plates dynamically (e.g., plate_S01, plate_S02)
+############################################################
+def detect_plates(root):
+    if not os.path.isdir(root):
+        return []
+    plates = [p for p in os.listdir(root) if p.startswith("plate_")]
+    plates.sort()
+    return plates
+
+PLATES = detect_plates(FASTP_ROOT)
+
+if len(PLATES) == 0:
+    print("ERROR: No plate directories found in trimmed_fastq/")
+    raise SystemExit
+
+print(f"Detected plates: {PLATES}")
+
+############################################################
+# FASTP PARSER (unchanged)
+############################################################
+def parse_fastp(plate_dir, plate):
+    report_dir = os.path.join(plate_dir, "reports")
+    if not os.path.isdir(report_dir):
+        return pd.DataFrame()
+    rows = []
+    for f in os.listdir(report_dir):
+        if not f.endswith("_fastp.json"):
+            continue
+        with open(os.path.join(report_dir, f)) as j:
+            data = json.load(j)
+        before = data["summary"]["before_filtering"]["total_reads"]
+        after = data["summary"]["after_filtering"]["total_reads"]
+        loss = 100 * (before - after) / before if before > 0 else None
+        mode = "PE" if "_R2" in f else "SE"
+        rows.append({
+            "Plate": plate,
+            "Mode": mode,
+            "Trim_InputReads": before,
+            "Trim_OutputReads": after,
+            "Trim_Loss_%": round(loss, 2),
+        })
+    return pd.DataFrame(rows)
+
+############################################################
+# BISMARK PARSER (unchanged logic)
+############################################################
+def parse_bismark(plate_dir, plate):
+    rows = []
+    mb_dir = os.path.join(plate_dir, "mapping_bismark")
+    if not os.path.isdir(mb_dir):
+        return pd.DataFrame()
+
+    for root, _, files in os.walk(mb_dir):
+        for f in files:
+            if not f.endswith("_report.txt"):
+                continue
+            text = open(os.path.join(root, f)).read()
+            total = eff = None
+            for line in text.splitlines():
+                if "Sequence pairs analysed in total" in line:
+                    total = int(re.findall(r"\d+", line)[0]) * 2
+                elif "Sequences analysed in total" in line and total is None:
+                    total = int(re.findall(r"\d+", line)[0])
+                elif "Mapping efficiency" in line:
+                    eff = float(line.split()[-1].replace("%", ""))
+            if total and eff is not None:
+                mode = "PE" if "_PE_" in f else "SE"
+                rows.append({
+                    "Plate": plate,
+                    "Mode": mode,
+                    "Bismark_InputReads": total,
+                    "Bismark_MappingRate_%": eff,
+                })
+    return pd.DataFrame(rows)
+
+############################################################
+# STAR PARSER (unchanged)
+############################################################
+def parse_star(plate_dir, plate):
+    rows = []
+    if not os.path.isdir(plate_dir):
+        return pd.DataFrame()
+
+    for root, _, files in os.walk(plate_dir):
+        for f in files:
+            if not f.endswith("Log.final.out"):
+                continue
+
+            stats = {}
+            with open(os.path.join(root, f)) as fh:
+                for line in fh:
+                    if "|" not in line:
+                        continue
+                    k, v = [x.strip() for x in line.split("|", 1)]
+                    stats[k] = v
+
+            def get(k):
+                return stats.get(k, "0").replace("%", "").replace(",", "").strip()
+
+            reads = int(get("Number of input reads"))
+            unique = float(get("Uniquely mapped reads %"))
+            multi = float(get("% of reads mapped to multiple loci"))
+            total_rate = unique + multi
+
+            mode = "PE" if "PE." in f else "SE"
+            if re.search(r"SE[12]", f):
+                mode = "SE"
+            if mode == "PE":
+                reads *= 2
+
+            rows.append({
+                "Plate": plate,
+                "Mode": mode,
+                "STAR_InputReads": reads,
+                "STAR_MappingRate_%": round(total_rate, 2),
+            })
+
+    return pd.DataFrame(rows)
+
+############################################################
+# Loader for all plates (UPDATED)
+############################################################
+def load_all(root, parser):
+    dfs = []
+    for plate in PLATES:
+        pdir = os.path.join(root, plate)
+        if os.path.isdir(pdir):
+            df = parser(pdir, plate)
+            if len(df):
+                dfs.append(df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+############################################################
+# Load summaries
+############################################################
+df_fastp   = load_all(FASTP_ROOT,   parse_fastp)
+df_bismark = load_all(BISMARK_ROOT, parse_bismark)
+df_star    = load_all(STAR_ROOT,    parse_star)
+
+df_fastp   = df_fastp.groupby(["Plate","Mode"]).mean(numeric_only=True).reset_index()
+df_bismark = df_bismark.groupby(["Plate","Mode"]).mean(numeric_only=True).reset_index()
+df_star    = df_star.groupby(["Plate","Mode"]).mean(numeric_only=True).reset_index()
+
+merged = (
+    df_fastp.merge(df_bismark, on=["Plate","Mode"], how="outer")
+            .merge(df_star,    on=["Plate","Mode"], how="outer")
+            .round(2)
+).replace({np.nan: "—"})
+
+outfile = os.path.join(OUTDIR, "combined_summary_by_plate.tsv")
+merged.to_csv(outfile, sep="\t", index=False)
+
+print("\n📊 Combined Readflow Summary (averages per plate × mode)\n")
+for plate, sub in merged.groupby("Plate"):
+    print(f"=== {plate} ===")
+    print(sub.to_string(index=False))
+    print()
+
+print(f"✅ Saved formatted summary to: {outfile}")
+EOF
+
+echo
+echo "[`date`] Completed step5_combined_summary"
+echo "===================================================================="

@@ -1,0 +1,133 @@
+#!/bin/bash
+#SBATCH --job-name=step4_dna_alignment
+#SBATCH --output=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step4_dna_alignment.out
+#SBATCH --error=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step4_dna_alignment.err
+#SBATCH --partition=highmem
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=40G
+#SBATCH --time=48:00:00
+
+echo "===================================================================="
+echo "[`date`] Starting step4_dna_alignment"
+echo "Host: $(hostname)"
+echo "===================================================================="
+
+############################################
+# Load CONFIG
+############################################
+if [[ -z "$CONFIG" ]]; then
+    echo "Missing CONFIG!"
+    exit 1
+fi
+source "$CONFIG"
+
+
+############################################
+# Detect available plates dynamically
+############################################
+TRIM_ROOT=${DIR_PROJ}/trimmed_fastq
+
+PLATES=($(ls -d ${TRIM_ROOT}/plate_* 2>/dev/null | xargs -n1 basename))
+
+if [[ ${#PLATES[@]} -eq 0 ]]; then
+    echo "[ERROR] No trimmed_fastq/plate_* folders found."
+    exit 1
+fi
+
+echo "[`date`] Detected plates: ${PLATES[@]}"
+echo
+
+############################################
+# Run alignment for each plate
+############################################
+for PLATE in "${PLATES[@]}"; do
+
+    TRIM_DIR=${TRIM_ROOT}/${PLATE}
+    SINGLETRIM_DIR=${TRIM_DIR}/unpaired
+    OUT_DIR=${DIR_PROJ}/bismark_alignment_SEPE/${PLATE}
+
+    mkdir -p ${OUT_DIR}/mapping_bismark
+
+    echo
+    echo "===================================================================="
+    echo "[`date`] Mapping DNA for ${PLATE}"
+    echo "Input:  ${TRIM_DIR}"
+    echo "Output: ${OUT_DIR}"
+    echo "===================================================================="
+
+    cd "${TRIM_DIR}"
+
+    ############################################
+    # Stage 1 — PE PBAT mapping
+    ############################################
+    for R1 in *_trimmed_R1.fq.gz; do
+        PREFIX=$(basename "${R1}" _trimmed_R1.fq.gz)
+        R2=${PREFIX}_trimmed_R2.fq.gz
+        WELL_DIR="${OUT_DIR}/mapping_bismark/${PREFIX}"
+
+        mkdir -p "${WELL_DIR}"
+
+        BAM_PE="${WELL_DIR}/${PREFIX}_trimmed_R1_bismark_bt2_pe.bam"
+
+        if [[ -s "${BAM_PE}" ]]; then
+            echo "[SKIP] ${PREFIX} PE BAM already exists."
+            continue
+        fi
+
+        echo "[`date`] PE mapping ${PREFIX} ..."
+        cd ${WELL_DIR}
+
+        bismark "${REF_DIR}" \
+            --bowtie2 \
+            --pbat \
+            --maxins 2000 \
+            --multicore 8 \
+            --un --ambiguous \
+            -1 "${TRIM_DIR}/${R1}" \
+            -2 "${TRIM_DIR}/${R2}"
+
+        cd ${TRIM_DIR}
+    done
+
+    ############################################
+    # Stage 2 — Single-end rescue mapping
+    ############################################
+    for R1 in *_trimmed_R1.fq.gz; do
+        PREFIX=$(basename "${R1}" _trimmed_R1.fq.gz)
+        WELL_DIR="${OUT_DIR}/mapping_bismark/${PREFIX}"
+
+        mkdir -p "${WELL_DIR}"
+        cd "${WELL_DIR}"
+
+        UNMAP1="${WELL_DIR}/${PREFIX}_trimmed_R1.fq.gz_unmapped_reads_1.fq.gz"
+        UNMAP2="${WELL_DIR}/${PREFIX}_trimmed_R2.fq.gz_unmapped_reads_2.fq.gz"
+        SINGLE1="${SINGLETRIM_DIR}/${PREFIX}_singletrim_R1.fq.gz"
+        SINGLE2="${SINGLETRIM_DIR}/${PREFIX}_singletrim_R2.fq.gz"
+
+        # SE R1
+        if [[ -s "${UNMAP1}" || -s "${SINGLE1}" ]]; then
+            echo "[`date`] SE-R1 mapping for ${PREFIX}"
+            bismark "${REF_DIR}" \
+                --bowtie2 \
+                --pbat \
+                --multicore 8 \
+                -se "${UNMAP1}:${SINGLE1}"
+        fi
+
+        # SE R2
+        if [[ -s "${UNMAP2}" || -s "${SINGLE2}" ]]; then
+            echo "[`date`] SE-R2 mapping for ${PREFIX}"
+            bismark "${REF_DIR}" \
+                --bowtie2 \
+                --multicore 8 \
+                -se "${UNMAP2}:${SINGLE2}"
+        fi
+
+        cd "${TRIM_DIR}"
+    done
+
+done
+
+echo
+echo "[`date`] Completed step4_dna_alignment"
+echo "===================================================================="

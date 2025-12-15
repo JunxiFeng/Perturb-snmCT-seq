@@ -1,73 +1,174 @@
-# snmCT-seq Bioinformatics Pipeline
+# SNMCT-seq Pipeline (Junxi Version)
 
+This repository contains a fully modular, Slurm-compatible SNMCT-seq processing pipeline customized for the Jin Lab / Luo Lab environment at UCSD–Scripps.  
+All steps are configured using a single `your_path_setups.config` file and run through a master launcher `run_pipeline.sh`.
 
+---
 
-![Overview of snmCT-seq pipeline.](./Documentation/snmCT_overview.png)
+# 📁 Directory Structure
 
-**snmCT-seq** is a technique to simultaneously profile the DNA methylome (mC) and transcriptome from a single nucleus. Individual nuclei (or cells) are sorted into 384-well plates where the snmCT-seq reaction adds cell barcodes and generates Illumina-compatible multi-modal libraries without any physical DNA/RNA separation.
+Your pipeline directory should look like:
 
-**What's this repo?**
-
-* Scripts to go from plate-level .fastqs &rarr; cell-level alignments (.bam), quality control metrics, and analyzeable mC & RNA features.
-* For the **methylome**, the primary features are the methylation counts and coverage for each cytosine in the genome (**.allc** file), which can then be aggregated across different genomic intervals (e.g., 100kb-bins, genes; **.mcds** file).
-* For the **transcriptome**, the features are gene- and exon-based read counts (full-length transcript coverage, versus 3'/5'-UMI).
-
-**What isn't this repo?**
-
-* Cell-level QC steps, which can be celltype- and study-specific. (Some suggestions on the [Detailed Overview](./Documentation/detailed_overview.md) page and within [past manuscripts](#technology-references).)
-* Downstream analysis of mC and RNA (e.g., feature selection, clustering, hypothesis testing). [allcools](https://lhqing.github.io/ALLCools/) and [seurat](https://satijalab.org/seurat/)/[scanpy](https://scanpy.readthedocs.io/) are good starting places for exporatory data analysis.
-
-## Getting Started
-
-1. Clone this repo (`git clone https://github.com/chooliu/snmCTseq_Pipeline.git`) or download via the [Releases page](https://github.com/chooliu/snmCTseq_Pipeline/releases). Rename folder to an informative "project directory" name.
-
-2. Install dependencies listed in `Documentation/snmCTseq.yml`. Installation and environment management via conda highly recommended.
 ```
-module load anaconda3 # or otherwise activate conda
-conda env create -f Documentation/snmCTseq.yml
+LuoLab_Pipeline_Custom_junxi/
+│
+├── run_pipeline.sh
+├── your_path_setups.config
+├── your_Scripts/
+│   ├── step1_prepare_genome_for_bismark.sub
+│   ├── step1_prepare_genome_for_star.sub
+│   ├── step2_demultiplex.sub
+│   ├── step3_trimming.sub
+│   ├── step4_dna_alignment.sub
+│   ├── step4_rna_alignment.sub
+│   ├── step5_combine_summary.sub
+│   ├── step6_gRNA_assignment.sub
+│   └── step7_pseudobulk_merge.sub
+│
+└── metadata/
+       ├── plate_S01.xlsx
+       └── plate_S02.xlsx
 ```
 
-3. Customize `snmCT_parameters.env` and scheduler submission scripts (`Scripts/*.sub`, especially `A00*` and `A01*`) via a text editor of your choice\*, paying special note to:\
-(i) compatibility with your compute/scheduler infrastrcture and sequencing depth,\
-(ii) genome/reference organism,\
-(iii) job array ranges based on the number of 384-well plates profiled. The range is `-t 1-Nplates` when a job is submitted for each plate (e.g., plate &rarr; well demultiplexing), but `-t 1-Nbatches` for more intensive tasks submitting small sets of wells per job (e.g., alignment; 24 wells per batch by default, so `Nbatch = Ncellstotal/24`).\
-\
-\* Alternatively, if you can access your server via Juypter, run each `.ipynb` in the `Notebooks` folder sequentially for organized script editing & access to extra in-line comments (also viewable in this repo's [Notebooks folder on Github](./Notebooks)).
+---
 
-4. Submit each submission scripts (`.sub` extension) in order:  `A00a`, `A00b`, `A00c`, `A01a`, `A01b`, ... I usually `qsub` all `A00*` scripts at once, all `A01*` at once, etc. For convenience, the full list of submission commands is listed at [Documentation/submission_helper.txt](./Documentation/submission_helper.txt)
+# ⚙️ Configuration File (`your_path_setups.config`)
 
+This file defines all input/output directories, references, modules, and metadata:
 
+Example:
 
-## Links
+```
+# project folders
+DIR_PROJ=/mnt/jin/group/junxi/snmctseq_cassie/snmct_seq_mbd2output
 
-### Repo Resources
+# raw FASTQs
+FASTQ_ROOT=/mnt/jin/group/cassie/Cassie/251205_Novaseq/CP_fastq_files
 
-*  [Detailed Overview](./Documentation/detailed_overview.md) (rationale for steps, FAQs, common pitfalls)
-* [Notebooks](./Notebooks)
-* [Revision History](./Documentation/revision_history.md)
-* [list of qsub commands](./Documentation/submission_helper.txt)
+# reference files
+REF_DIR=/mnt/jin/group/reference/mouse_gencode_vM38
+REF_FASTA=${REF_DIR}/GRCm39.primary_assembly.genome.fa
+REF_GTF=${REF_DIR}/gencode.vM38.primary_assembly.annotation.gtf
 
-### Related Pipelines
+RUN_GENOME_PREP=false
 
-This pipeline originated from my experimental updates for processing snmCT-seq  (and closely related methylation-only snmC-seq3) data using **paired-end alignment and quantification**. Its current construction is thus a set of scripts tailored to the UCLA Hoffman2 computing server for accessibility.
+# STAR index
+STAR_INDEX=${REF_DIR}/STAR149
 
-Related work to consider:
+# pipeline scripts
+PIPELINE_DIR=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi
 
-* [YAP (Yet Another Pipeline)](https://hq-1.gitbook.io/mc/): supports snmCT-seq and additional related assays (e.g., mC, m3C, mCAT-seq). Snakemake. Developed by the Ecker Lab/Dr. Hanqing Liu (Salk Institute).
-* [allcools](https://lhqing.github.io/ALLCools): Also by Hanqing Liu and typically used by our group for mC downstream analysis. Helpful to review for .allc and .mcds descriptions. 
-* [WARP/CEMBA](https://broadinstitute.github.io/warp/docs/Pipelines/CEMBA_MethylC_Seq_Pipeline/README): Broad Institute, WDL-based snmC-seq (methylation-only) pipeline compiled as part of the BRAIN Initiative.
+# metadata folder
+METADATA_DIR=${PIPELINE_DIR}/metadata
+RATIO_CUTOFF=2.0
+```
 
-### Technology References
+---
 
-* Our library structure is described in the [Detailed Overview](./Documentation/detailed_overview.md) and a [seqspec](https://igvf.github.io/seqspec/specs/snmCTseq/spec.html). 
-* Flagship assay paper (where "mCAT" = mCT plus additional NOME-seq for chromatin accessibility profiling, but also is our prefered citation for snmCT-seq)
-    - [snmCAT-seq](https://pubmed.ncbi.nlm.nih.gov/35419551/): Luo, C. et al. Single nucleus multi-omics identifies human cortical cell regulatory genome diversity. Cell Genomics 2, 100107 (2022).
-* Understanding the underlying mC and RNA reactions:
-    - [snmC-seq2](https://pubmed.ncbi.nlm.nih.gov/30237449/): Luo, C. et al. Robust single-cell DNA methylome profiling with snmC-seq2. Nat. Commun. 9, 7–12 (2018).
-    - [Smart-seq2](https://pubmed.ncbi.nlm.nih.gov/24385147/): Picelli, S. et al. Full-length RNA-seq from single cells using Smart-seq2. Nat. Protoc. 9, 171–181 (2014).  [Note: we are now on [snmC-seq3](https://www.protocols.io/view/snm3c-seq3-cwxuxfnw.html) but only a wet lab protocol citation exists.]
+# 🧬 Metadata Format (gRNA Assignment)
 
-### Acknowledgements
+Each plate must have **one Excel file** in `metadata/` with the name:
 
-* Dr. Chongyuan Luo (original workflow, demultiplexing/filtering scripts)
-* Dr. Hanqing Liu ([@lhqing](https://github.com/lhqing)) for updating allcools for paired-end processing
-* Luo Lab collaborators/members for pipeline testing and feedback, namely Dr. Katie Eyring (Geschwind Lab), Nasser Elhajjaoui, Kevin Abuhanna, and Terence Li.
+```
+plate_S01.xlsx
+plate_S02.xlsx
+```
+
+Format:
+
+| WELL | Dnmt1_g1 | Dnmt1_g2 | Mbd2_g1 | Safe_g1 | Safe_g2 |
+|------|----------|----------|---------|---------|---------|
+| A1   | 0        | 513      | 6       | 0       | 0       |
+| A10  | 0        | 7        | 4       | 0       | 0       |
+
+The pipeline will automatically:
+
+- detect plate names  
+- load all metadata files  
+- merge them  
+- label wells as **D1**, **ST**, or **Ambiguous**
+
+---
+
+# 🚀 Running the Pipeline
+
+Use:
+
+```
+sbatch run_pipeline.sh
+```
+
+The pipeline:
+
+1. Optionally prepares genome indices (if `RUN_GENOME_PREP=true`)
+2. Demultiplexes FASTQs  
+3. Trims reads  
+4. Aligns DNA (Bismark)  
+5. Aligns RNA (STAR)  
+6. Generates combined QC summary  
+7. Assigns gRNAs  
+8. Produces pseudobulk BAMs per condition (D1 vs ST)
+
+You will see outputs in:
+
+```
+${DIR_PROJ}/demultiplexed_fastq
+${DIR_PROJ}/trimmed_fastq
+${DIR_PROJ}/bismark_alignment
+${DIR_PROJ}/star_alignment
+${DIR_PROJ}/combined_summary
+${DIR_PROJ}/gRNA_assignments
+${DIR_PROJ}/pseudobulk_bams
+```
+
+---
+
+# 📊 Logging
+
+All logs are written to:
+
+```
+your_job_logs/
+```
+
+- One log per Slurm step  
+- One master log from the `run_pipeline.sh` job  
+
+---
+
+# ❗ Important Notes
+
+### 1. **Do NOT hardcode paths inside scripts.**  
+Everything must come from the config file.
+
+### 2. **Do NOT use `#SBATCH --chdir=`**  
+All scripts rely on absolute paths and explicitly `cd` into the correct working directory.
+
+### 3. The pipeline supports:
+- Single plate  
+- Two plates  
+- Any number of plates matching `plate_S*.xlsx`
+
+### 4. Dependencies ensure:
+- If any step fails → all downstream steps **auto-cancel**
+
+---
+
+# ✅ Summary
+
+This pipeline is:
+
+- Fully modular  
+- Automatically plate-aware  
+- Supports dynamic metadata  
+- Safe on Slurm clusters  
+- End-to-end for SNMCT-seq (DNA + RNA)  
+
+If you'd like, I can generate a **versioned release**, **PDF manual**, or **flowchart diagram**.
+
+---
+
+# 🧪 Contact
+
+Pipeline author: **Junxi Feng**  
+For issues: Ask ChatGPT 😉

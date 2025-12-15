@@ -1,0 +1,157 @@
+#!/bin/bash
+#SBATCH --job-name=step6_gRNA_assignment
+#SBATCH --output=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step6_gRNA_assignment.out
+#SBATCH --error=/gpfs/home/junxif/xin_lab/LuoLab_Pipeline_Custom_junxi/your_job_logs/step6_gRNA_assignment.err
+#SBATCH --time=2:00:00
+#SBATCH --mem=8G
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=highmem
+
+echo "===================================================================="
+echo "[`date`] Starting step6_gRNA_assignment"
+echo "Host: $(hostname)"
+echo "===================================================================="
+echo
+
+############################################
+# Load CONFIG
+############################################
+if [[ -z "$CONFIG" ]]; then
+    echo "Missing CONFIG!"
+    exit 1
+fi
+source "$CONFIG"
+
+
+############################################
+# Environment
+############################################
+module load python/3.8.3
+
+############################################
+# Metadata directory (one file per plate)
+############################################
+META_DIR=${METADATA_DIR}
+OUTDIR=${DIR_PROJ}/gRNA_assignments
+mkdir -p ${OUTDIR}
+
+echo "[`date`] Metadata directory: ${META_DIR}"
+
+# Detect files: allow .csv or .xlsx
+META_FILES=( $(ls ${META_DIR}/plate_*.* 2>/dev/null) )
+
+if [[ ${#META_FILES[@]} -eq 0 ]]; then
+    echo "[ERROR] No metadata files found in ${META_DIR} matching plate_*.csv or plate_*.xlsx"
+    exit 1
+fi
+
+echo "[`date`] Detected metadata files:"
+printf ' - %s\n' "${META_FILES[@]}"
+echo
+
+export META_DIR
+export OUTDIR
+export RATIO_CUTOFF
+export METADATA_FILES="${META_FILES[*]}"
+
+############################################
+# Run Python
+############################################
+python3 << 'EOF'
+import os
+import pandas as pd
+
+META_FILES = os.environ["METADATA_FILES"].split()
+OUTDIR = os.environ["OUTDIR"]
+RATIO_CUTOFF = float(os.environ["RATIO_CUTOFF"])
+
+os.makedirs(OUTDIR, exist_ok=True)
+
+print(f"\nUsing ratio cutoff {RATIO_CUTOFF}× for classification\n")
+
+############################################
+# Classification logic (unchanged!)
+############################################
+def classify_rows(df):
+    df.columns = [c.strip() for c in df.columns]
+
+    def classify(row):
+        d1 = row["Dnmt1_g1"] + row.get("Dnmt1_g2", 0)
+        st = row["Safe_g1"] + row["Safe_g2"]
+
+        # zero-gRNA case
+        if d1 == 0 and st == 0:
+            return pd.Series(["Unknown", 0])
+
+        ratio = max(d1, st) / max(1, min(d1, st))
+
+        if ratio < RATIO_CUTOFF:
+            label = "Ambiguous"
+        elif d1 > st:
+            label = "D1"
+        else:
+            label = "ST"
+
+        return pd.Series([label, ratio])
+
+    df[["Assigned_Label", "Computed_Ratio"]] = df.apply(classify, axis=1)
+    df["Dnmt1_total"] = df["Dnmt1_g1"] + df.get("Dnmt1_g2", 0)
+    df["Safe_total"] = df["Safe_g1"] + df["Safe_g2"]
+    df["Dominant_Target"] = df["Assigned_Label"]
+    return df
+
+
+############################################
+# Process all metadata files
+############################################
+combined_list = []
+
+for f in META_FILES:
+    fname = os.path.basename(f)
+    plate_name = fname.replace("plate_", "").split(".")[0]
+
+    print(f"[Loading] {fname} → batch={plate_name}")
+
+    if f.endswith(".csv"):
+        df = pd.read_csv(f)
+    else:
+        df = pd.read_excel(f)
+
+    df["Batch"] = plate_name
+    df = classify_rows(df)
+    combined_list.append(df)
+
+############################################
+# Combine all plates
+############################################
+combined = pd.concat(combined_list, ignore_index=True)
+
+############################################
+# Summary table
+############################################
+summary = (
+    combined["Assigned_Label"]
+    .value_counts()
+    .rename_axis("Label")
+    .reset_index(name="Num_Wells")
+)
+
+print("\n📊 Summary of all plates:")
+print(summary.to_string(index=False))
+
+############################################
+# Save
+############################################
+combined_file = os.path.join(OUTDIR, "combined_cleaned_gRNA_assignments.tsv")
+summary_file  = os.path.join(OUTDIR, "gRNA_label_summary.tsv")
+
+combined.to_csv(combined_file, sep="\t", index=False)
+summary.to_csv(summary_file, sep="\t", index=False)
+
+print(f"\n✅ Saved combined assignments → {combined_file}")
+print(f"✅ Saved label summary       → {summary_file}")
+EOF
+
+echo
+echo "[`date`] Completed step6_gRNA_assignment"
+echo "===================================================================="
